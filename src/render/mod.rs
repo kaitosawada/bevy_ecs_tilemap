@@ -6,6 +6,7 @@ use bevy::{
     prelude::*,
     reflect::TypeUuid,
     render::{
+        extract_resource::{extract_resource, ExtractResource},
         mesh::MeshVertexAttribute,
         render_phase::AddRenderCommand,
         render_resource::{
@@ -13,6 +14,7 @@ use bevy::{
         },
         Render, RenderApp, RenderSet,
     },
+    utils::HashSet,
 };
 
 #[cfg(not(feature = "atlas"))]
@@ -242,6 +244,9 @@ impl Plugin for TilemapRenderingPlugin {
             Shader::from_wgsl
         );
 
+        app.init_resource::<ModifiedImageHandles>()
+            .add_systems(Update, collect_modified_image_asset_events);
+
         let render_app = match app.get_sub_app_mut(RenderApp) {
             Ok(render_app) => render_app,
             Err(_) => return,
@@ -252,7 +257,8 @@ impl Plugin for TilemapRenderingPlugin {
         #[cfg(not(feature = "atlas"))]
         render_app
             .init_resource::<TextureArrayCache>()
-            .add_systems(Render, prepare_textures.in_set(RenderSet::Prepare));
+            .add_systems(Render, prepare_textures.in_set(RenderSet::Prepare))
+            .add_systems(Render, texture_array_cache::remove_modified_textures);
 
         render_app
             .insert_resource(DefaultSampler(sampler))
@@ -262,7 +268,11 @@ impl Plugin for TilemapRenderingPlugin {
             .insert_resource(SecondsSinceStartup(0.0))
             .add_systems(
                 ExtractSchedule,
-                (extract::extract, extract::extract_removal),
+                (
+                    extract::extract,
+                    extract::extract_removal,
+                    extract_resource::<ModifiedImageHandles>,
+                ),
             )
             .add_systems(
                 Render,
@@ -277,7 +287,8 @@ impl Plugin for TilemapRenderingPlugin {
             .init_resource::<ImageBindGroups>()
             .init_resource::<SpecializedRenderPipelines<TilemapPipeline>>()
             .init_resource::<MeshUniformResource>()
-            .init_resource::<TilemapUniformResource>();
+            .init_resource::<TilemapUniformResource>()
+            .init_resource::<ModifiedImageHandles>();
 
         render_app.add_render_command::<Transparent2d, DrawTilemap>();
     }
@@ -361,4 +372,36 @@ fn prepare_textures(
     }
 
     texture_array_cache.prepare(&render_device, &render_images);
+}
+
+// Resource to hold the handles of modified Image assets of a single frame.
+#[derive(Resource, ExtractResource, Clone, Default)]
+pub struct ModifiedImageHandles(HashSet<Handle<Image>>);
+
+impl ModifiedImageHandles {
+    // Determines whether `texture` contains any handles of modified images.
+    pub fn is_texture_modified(&self, texture: &TilemapTexture) -> bool {
+        texture
+            .image_handles()
+            .iter()
+            .any(|&image| self.0.contains(image))
+    }
+}
+
+// A system to collect the asset events of modified images for one frame. AssetEvents cannot be
+// read from the render sub-app, so this system packs them up into a convenient resource which can
+// be extracted for rendering.
+pub fn collect_modified_image_asset_events(
+    mut asset_events: EventReader<AssetEvent<Image>>,
+    mut modified_image_handles: ResMut<ModifiedImageHandles>,
+) {
+    modified_image_handles.0.clear();
+
+    for asset_event in asset_events.iter() {
+        let handle = match asset_event {
+            AssetEvent::Modified { handle } => handle,
+            _ => continue,
+        };
+        modified_image_handles.0.insert(handle.clone_weak());
+    }
 }
