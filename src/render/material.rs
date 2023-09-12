@@ -32,7 +32,7 @@ use super::{
     draw::DrawTilemapMaterial,
     pipeline::{TilemapPipeline, TilemapPipelineKey},
     queue::{ImageBindGroups, TilemapViewBindGroup},
-    RenderYSort,
+    ModifiedImageHandles, RenderYSort,
 };
 
 #[cfg(not(feature = "atlas"))]
@@ -388,7 +388,10 @@ pub fn queue_material_tilemap_meshes<M: MaterialTilemap>(
         &VisibleEntities,
         &mut RenderPhase<Transparent2d>,
     )>,
-    render_materials: Res<RenderMaterialsTilemap<M>>,
+    (render_materials, modified_image_handles): (
+        Res<RenderMaterialsTilemap<M>>,
+        Res<ModifiedImageHandles>,
+    ),
     #[cfg(not(feature = "atlas"))] (mut texture_array_cache, render_queue): (
         ResMut<TextureArrayCache>,
         Res<RenderQueue>,
@@ -464,31 +467,36 @@ pub fn queue_material_tilemap_meshes<M: MaterialTilemap>(
                         continue;
                     }
 
-                    image_bind_groups
-                        .values
-                        .entry(chunk.texture.clone_weak())
-                        .or_insert_with(|| {
-                            #[cfg(not(feature = "atlas"))]
-                            let gpu_image = texture_array_cache.get(&chunk.texture);
-                            #[cfg(feature = "atlas")]
-                            let gpu_image = gpu_images.get(chunk.texture.image_handle()).unwrap();
-                            render_device.create_bind_group(&BindGroupDescriptor {
-                                entries: &[
-                                    BindGroupEntry {
-                                        binding: 0,
-                                        resource: BindingResource::TextureView(
-                                            &gpu_image.texture_view,
-                                        ),
-                                    },
-                                    BindGroupEntry {
-                                        binding: 1,
-                                        resource: BindingResource::Sampler(&gpu_image.sampler),
-                                    },
-                                ],
-                                label: Some("sprite_material_bind_group"),
-                                layout: &tilemap_pipeline.material_layout,
-                            })
-                        });
+                    let create_bind_group = || {
+                        #[cfg(not(feature = "atlas"))]
+                        let gpu_image = texture_array_cache.get(&chunk.texture);
+                        #[cfg(feature = "atlas")]
+                        let gpu_image = gpu_images.get(chunk.texture.image_handle()).unwrap();
+                        render_device.create_bind_group(&BindGroupDescriptor {
+                            entries: &[
+                                BindGroupEntry {
+                                    binding: 0,
+                                    resource: BindingResource::TextureView(&gpu_image.texture_view),
+                                },
+                                BindGroupEntry {
+                                    binding: 1,
+                                    resource: BindingResource::Sampler(&gpu_image.sampler),
+                                },
+                            ],
+                            label: Some("sprite_material_bind_group"),
+                            layout: &tilemap_pipeline.material_layout,
+                        })
+                    };
+                    if modified_image_handles.is_texture_modified(&chunk.texture) {
+                        image_bind_groups
+                            .values
+                            .insert(chunk.texture.clone_weak(), create_bind_group());
+                    } else {
+                        image_bind_groups
+                            .values
+                            .entry(chunk.texture.clone_weak())
+                            .or_insert_with(create_bind_group);
+                    }
 
                     let key = TilemapPipelineKey {
                         msaa: msaa.samples(),
